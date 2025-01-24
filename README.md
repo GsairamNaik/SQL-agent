@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Vanna.AI Streamlit App
 <img width="1392" alt="Screenshot 2023-06-23 at 3 49 45 PM" src="./assets/vanna_demo.gif">
 
@@ -24,3 +25,6 @@ streamlit run app.py
 
 ## License
 [MIT](https://choosealicense.com/licenses/mit/)
+=======
+# SQL-agent
+>>>>>>> 6703d52243f9299658dc5a091585481a282b0cf2
