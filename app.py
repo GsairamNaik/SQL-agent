@@ -1,153 +1,88 @@
-import time
+
 import streamlit as st
-from vanna_calls import (
-    generate_questions_cached,
-    generate_sql_cached,
-    run_sql_cached,
-    generate_plotly_code_cached,
-    generate_plot_cached,
-    generate_followup_cached,
-    should_generate_chart_cached,
-    is_sql_valid_cached,
-    generate_summary_cached
+import pandas as pd
+import plotly.express as px
+from vanna_calls import setup_vanna, run_query  # Import necessary functions from your backend
+
+# Streamlit Page Configuration
+st.set_page_config(page_title="Chat4BA", layout="wide", page_icon="https://chat4ba.z29.web.core.windows.net/", initial_sidebar_state="expanded")
+
+# Add logo to the top-left corner
+st.markdown(
+    """
+    <style>
+    .logo-container { display: flex; align-items: center; gap: 10px; }
+    .logo-container img { width: 50px; height: auto; }
+    .logo-container h1 { margin: 0; font-size: 1.5em; }
+    </style>
+    <div class="logo-container">
+        <img src="https://chat4ba.z29.web.core.windows.net/" alt="Logo">
+        <h1>Chat4BA</h1>
+    </div>
+    """,
+    unsafe_allow_html=True
 )
 
-avatar_url = "https://vanna.ai/img/vanna.svg"
-
-st.set_page_config(layout="wide")
-
+# Sidebar Settings
 st.sidebar.title("Output Settings")
-st.sidebar.checkbox("Show SQL", value=True, key="show_sql")
-st.sidebar.checkbox("Show Table", value=True, key="show_table")
-st.sidebar.checkbox("Show Plotly Code", value=True, key="show_plotly_code")
+st.sidebar.checkbox("Show SQL Query", value=True, key="show_sql")
+st.sidebar.checkbox("Show Query Results (Table)", value=True, key="show_table")
 st.sidebar.checkbox("Show Chart", value=True, key="show_chart")
 st.sidebar.checkbox("Show Summary", value=True, key="show_summary")
 st.sidebar.checkbox("Show Follow-up Questions", value=True, key="show_followup")
-st.sidebar.button("Reset", on_click=lambda: set_question(None), use_container_width=True)
 
-st.title("Vanna AI")
-# st.sidebar.write(st.session_state)
+# Data Visualization Function
+def visualize_data(df):
+    """Visualize data based on the DataFrame."""
+    st.subheader("Visualization:")
+    if df.shape[1] > 1:
+        chart_type = st.selectbox("Choose Chart Type:", ["Bar", "Line", "Scatter"], key="chart_type")
+        x_axis = st.selectbox("X-axis", df.columns, key="x_axis")
+        y_axis = st.selectbox("Y-axis", df.columns, key="y_axis")
+        if chart_type == "Bar":
+            fig = px.bar(df, x=x_axis, y=y_axis, title="Bar Chart", text_auto=True)
+        elif chart_type == "Line":
+            fig = px.line(df, x=x_axis, y=y_axis, title="Line Chart")
+        elif chart_type == "Scatter":
+            fig = px.scatter(df, x=x_axis, y=y_axis, title="Scatter Plot")
+        st.plotly_chart(fig)
+    else:
+        st.warning("Visuals are shown for valid data")
 
+# Main Functionality
+def main():
+    st.subheader("Ask a Question:")
+    question = st.text_input("Enter your database question:", placeholder="Type your question here...")
 
-def set_question(question):
-    st.session_state["my_question"] = question
+    # Call backend functions
+    if question:
+        sql_gen = setup_vanna()  # Set up the Vanna instance
+        try:
+            sql_query = sql_gen.generate_query(question)
 
+            if sql_query and st.session_state.get("show_sql", True):
+                st.subheader("Generated SQL Query:")
+                st.code(sql_query, language="sql")
 
-assistant_message_suggested = st.chat_message(
-    "assistant", avatar=avatar_url
-)
-if assistant_message_suggested.button("Click to show suggested questions"):
-    st.session_state["my_question"] = None
-    questions = generate_questions_cached()
-    for i, question in enumerate(questions):
-        time.sleep(0.05)
-        button = st.button(
-            question,
-            on_click=set_question,
-            args=(question,),
-        )
+            if sql_query:
+                df = run_query(sql_query)  # Execute the SQL query
 
-my_question = st.session_state.get("my_question", default=None)
+                if df is not None and st.session_state.get("show_table", True):
+                    st.subheader("Query Results:")
+                    st.dataframe(df, use_container_width=True)
 
-if my_question is None:
-    my_question = st.chat_input(
-        "Ask me a question about your data",
-    )
-
-
-if my_question:
-    st.session_state["my_question"] = my_question
-    user_message = st.chat_message("user")
-    user_message.write(f"{my_question}")
-
-    sql = generate_sql_cached(question=my_question)
-
-    if sql:
-        if is_sql_valid_cached(sql=sql):
-            if st.session_state.get("show_sql", True):
-                assistant_message_sql = st.chat_message(
-                    "assistant", avatar=avatar_url
-                )
-                assistant_message_sql.code(sql, language="sql", line_numbers=True)
-        else:
-            assistant_message = st.chat_message(
-                "assistant", avatar=avatar_url
-            )
-            assistant_message.write(sql)
-            st.stop()
-
-        df = run_sql_cached(sql=sql)
-
-        if df is not None:
-            st.session_state["df"] = df
-
-        if st.session_state.get("df") is not None:
-            if st.session_state.get("show_table", True):
-                df = st.session_state.get("df")
-                assistant_message_table = st.chat_message(
-                    "assistant",
-                    avatar=avatar_url,
-                )
-                if len(df) > 10:
-                    assistant_message_table.text("First 10 rows of data")
-                    assistant_message_table.dataframe(df.head(10))
-                else:
-                    assistant_message_table.dataframe(df)
-
-            if should_generate_chart_cached(question=my_question, sql=sql, df=df):
-
-                code = generate_plotly_code_cached(question=my_question, sql=sql, df=df)
-
-                if st.session_state.get("show_plotly_code", False):
-                    assistant_message_plotly_code = st.chat_message(
-                        "assistant",
-                        avatar=avatar_url,
-                    )
-                    assistant_message_plotly_code.code(
-                        code, language="python", line_numbers=True
-                    )
-
-                if code is not None and code != "":
                     if st.session_state.get("show_chart", True):
-                        assistant_message_chart = st.chat_message(
-                            "assistant",
-                            avatar=avatar_url,
-                        )
-                        fig = generate_plot_cached(code=code, df=df)
-                        if fig is not None:
-                            assistant_message_chart.plotly_chart(fig)
-                        else:
-                            assistant_message_chart.error("I couldn't generate a chart")
-
-            if st.session_state.get("show_summary", True):
-                assistant_message_summary = st.chat_message(
-                    "assistant",
-                    avatar=avatar_url,
-                )
-                summary = generate_summary_cached(question=my_question, df=df)
-                if summary is not None:
-                    assistant_message_summary.text(summary)
+                        visualize_data(df)
 
             if st.session_state.get("show_followup", True):
-                assistant_message_followup = st.chat_message(
-                    "assistant",
-                    avatar=avatar_url,
-                )
-                followup_questions = generate_followup_cached(
-                    question=my_question, sql=sql, df=df
-                )
-                st.session_state["df"] = None
+                st.subheader("Follow-up Questions:")
+                related_questions = sql_gen.generate_related_questions(question)
+                for idx, rq in enumerate(related_questions, start=1):
+                    st.write(f"{idx}. {rq}")
 
-                if len(followup_questions) > 0:
-                    assistant_message_followup.text(
-                        "Here are some possible follow-up questions"
-                    )
-                    # Print the first 5 follow-up questions
-                    for question in followup_questions[:5]:
-                        assistant_message_followup.button(question, on_click=set_question, args=(question,))
+        except Exception as e:
+            st.error(f"Error: {e}")
 
-    else:
-        assistant_message_error = st.chat_message(
-            "assistant", avatar=avatar_url
-        )
-        assistant_message_error.error("I wasn't able to generate SQL for that question")
+if __name__ == "__main__":
+    main()
+
