@@ -1,58 +1,171 @@
+#Backend Code
+import sqlite3
+import pandas as pd
+import openai
 import streamlit as st
+import re
+from chromadb.config import Settings
+from chromadb import Client
+import numpy as np
 
-from vanna.remote import VannaDefault
 
-@st.cache_resource(ttl=3600)
+# ChromaDB setup
+def setup_chromadb():
+    settings = Settings(
+        persist_directory="C:\\Users\\admin\\PycharmProjects\\VannaAI\\vanna-streamlit\\chroma_data"  # Specify the correct path here
+    )
+    client = Client(settings)
+
+    try:
+        collection = client.get_collection("prompts")
+    except Exception:
+        collection = client.create_collection("prompts")
+
+    return collection
+
+
+def generate_embeddings(question):
+    response = openai.Embedding.create(
+        model="gpt-4",
+        input=question,
+        deployment_id="text-embedding-ada-002"
+    )
+    return response['data'][0]['embedding']
+
+
+def retrieve_similar_prompt(collection, question):
+    embeddings = generate_embeddings(question)
+    embeddings = [embeddings]
+    results = collection.query(
+        query_embeddings=embeddings,
+        n_results=1
+    )
+    return results['documents'][0] if results['documents'] else None
+
+
+def store_prompt(collection, question, sql_query):
+    collection.add(
+        documents=[question],
+        metadatas=[{"sql_query": sql_query}],
+        ids=[str(hash(question))]
+    )
+
+
+class AzureOpenAIClient:
+    def __init__(self, api_key, endpoint, api_version, deployment_id):
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.api_version = api_version
+        self.deployment_id = deployment_id
+        openai.api_key = self.api_key
+        openai.api_base = self.endpoint
+        openai.api_type = "azure"
+        openai.api_version = self.api_version
+
+    def generate_chat_completion(self, messages, max_tokens=150, temperature=0.2):
+        try:
+            response = openai.ChatCompletion.create(
+                engine=self.deployment_id,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"Error details: {e}")
+            raise
+
+
+class SQLGenerator:
+    def __init__(self, azure_client, chromadb_collection):
+        self.azure_client = azure_client
+        self.chromadb_collection = chromadb_collection
+
+    def generate_query(self, question):
+        similar_prompt = retrieve_similar_prompt(self.chromadb_collection, question)
+        if similar_prompt:
+            st.write(f"Found similar question in database: {similar_prompt}")
+            return similar_prompt['sql_query']
+
+        try:
+            messages = [
+                {"role": "system", "content": "You are an expert in SQL query generation. Respond only with valid SQLite queries."},
+                {"role": "user", "content": f"Generate an SQL query for: '{question}'"}
+            ]
+            response = self.azure_client.generate_chat_completion(messages)
+            sql_query = self.extract_sql_query(response)
+            store_prompt(self.chromadb_collection, question, sql_query)
+            return sql_query
+        except Exception as e:
+            return f"Error generating query: {e}"
+
+    def extract_sql_query(self, response):
+        cleaned_response = re.sub(r"```sql|```", "", response).strip()
+        match = re.search(r"^(SELECT.*|INSERT.*|UPDATE.*|DELETE.*|CREATE.*|DROP.*|ALTER.*|REPLACE.*|PRAGMA.*)", cleaned_response, re.IGNORECASE)
+        return match.group(0).strip() if match else "No valid SQL query found."
+
+    def explain_query(self, sql_query):
+        try:
+            messages = [
+                {"role": "system", "content": "You are an expert in SQL. Explain the query in simple terms."},
+                {"role": "user", "content": f"Explain this SQL query: '{sql_query}'"}
+            ]
+            response = self.azure_client.generate_chat_completion(messages)
+            return response
+        except Exception as e:
+            return f"Error explaining query: {e}"
+
+    def explain_data(self, df):
+        try:
+            data_summary = df.describe(include='all').to_string()  # Summarizes the dataset
+            messages = [
+                {"role": "system", "content": "You are an expert in data analysis. Explain the given dataset in simple terms."},
+                {"role": "user", "content": f"Explain this dataset: {data_summary}"}
+            ]
+            response = self.azure_client.generate_chat_completion(messages)
+            return response
+        except Exception as e:
+            return f"Error explaining data: {e}"
+
+
+def connect_to_sqlite():
+    try:
+        db_path = st.secrets.get("SQLITE_DB_PATH")
+        connection = sqlite3.connect(db_path)
+        return connection
+    except Exception as e:
+        st.error(f"Error connecting to SQLite: {e}")
+        return None
+
+
+def run_query(sql_query):
+    connection = connect_to_sqlite()
+    if connection:
+        try:
+            cursor = connection.cursor()
+            cursor.execute(sql_query)
+            columns = [col[0] for col in cursor.description]
+            rows = cursor.fetchall()
+            df = pd.DataFrame(rows, columns=columns)
+            connection.close()
+            return df
+        except Exception as e:
+            st.error(f"Error executing query: {e}")
+            connection.close()
+            return None
+    return None
+
+
 def setup_vanna():
-    vn = VannaDefault(api_key=st.secrets.get("VANNA_API_KEY"), model='chinook')
-    vn.connect_to_sqlite("https://vanna.ai/Chinook.sqlite")
-    return vn
-
-@st.cache_data(show_spinner="Generating sample questions ...")
-def generate_questions_cached():
-    vn = setup_vanna()
-    return vn.generate_questions()
-
-
-@st.cache_data(show_spinner="Generating SQL query ...")
-def generate_sql_cached(question: str):
-    vn = setup_vanna()
-    return vn.generate_sql(question=question, allow_llm_to_see_data=True)
-
-@st.cache_data(show_spinner="Checking for valid SQL ...")
-def is_sql_valid_cached(sql: str):
-    vn = setup_vanna()
-    return vn.is_sql_valid(sql=sql)
-
-@st.cache_data(show_spinner="Running SQL query ...")
-def run_sql_cached(sql: str):
-    vn = setup_vanna()
-    return vn.run_sql(sql=sql)
-
-@st.cache_data(show_spinner="Checking if we should generate a chart ...")
-def should_generate_chart_cached(question, sql, df):
-    vn = setup_vanna()
-    return vn.should_generate_chart(df=df)
-
-@st.cache_data(show_spinner="Generating Plotly code ...")
-def generate_plotly_code_cached(question, sql, df):
-    vn = setup_vanna()
-    code = vn.generate_plotly_code(question=question, sql=sql, df=df)
-    return code
+    azure_client = AzureOpenAIClient(
+        api_key=st.secrets.get("AZURE_OPENAI_API_KEY"),
+        endpoint=st.secrets.get("AZURE_OPENAI_ENDPOINT"),
+        api_version=st.secrets.get("AZURE_OPENAI_API_VERSION"),
+        deployment_id=st.secrets.get("OPENAI_DEPLOYMENT_ID")
+    )
+    chromadb_collection = setup_chromadb()
+    return SQLGenerator(azure_client=azure_client, chromadb_collection=chromadb_collection)
 
 
-@st.cache_data(show_spinner="Running Plotly code ...")
-def generate_plot_cached(code, df):
-    vn = setup_vanna()
-    return vn.get_plotly_figure(plotly_code=code, df=df)
 
 
-@st.cache_data(show_spinner="Generating followup questions ...")
-def generate_followup_cached(question, sql, df):
-    vn = setup_vanna()
-    return vn.generate_followup_questions(question=question, sql=sql, df=df)
-
-@st.cache_data(show_spinner="Generating summary ...")
-def generate_summary_cached(question, df):
-    vn = setup_vanna()
-    return vn.generate_summary(question=question, df=df)
